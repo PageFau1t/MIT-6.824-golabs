@@ -22,6 +22,11 @@ type ExampleReply struct {
 	Y int
 }
 
+type SubmitMapReq struct {
+	filename string
+	reduceSources [][]KeyValue
+}
+
 // Add your RPC definitions here.
 
 

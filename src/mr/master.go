@@ -6,10 +6,12 @@ import "os"
 import "net/rpc"
 import "net/http"
 
-
 type Master struct {
 	// Your definitions here.
-
+	mapTasks      []int
+	filenames     []string
+	reduceTasks   []int
+	reduceSources [][]KeyValue
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -24,6 +26,17 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (m *Master) SubmitMap(args *SubmitMapReq, resp interface{}) error {
+	for i, source := range args.reduceSources {
+		m.reduceSources[i] = append(m.reduceSources[i], source...)
+	}
+	for i, name := range m.filenames {
+		if name == args.filename {
+			m.mapTasks[i] = 1
+		}
+	}
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +63,6 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -64,6 +76,9 @@ func MakeMaster(files []string, nReduce int) *Master {
 
 	// Your code here.
 
+	m.mapTasks = make([]int, len(files))
+	m.reduceSources = make([][]KeyValue, nReduce)
+	m.filenames = files
 
 	m.server()
 	return &m
