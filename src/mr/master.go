@@ -1,16 +1,36 @@
 package mr
 
-import "log"
+import (
+	"fmt"
+	"log"
+	"strconv"
+	"sync"
+	"time"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
-
 type Master struct {
 	// Your definitions here.
+	mapTasks  []int
+	filenames []string
 
+	reduceTasks   []int
+	reduceSources [][]KeyValue // row: reduce task.
+	nReduce       int
+
+	reduceResults [][]KeyValue
 }
+
+const (
+	PENDING      = 0
+	DONE         = 2
+	WorkerOffset = 10000
+)
+
+var lock sync.Mutex
 
 // Your code here -- RPC handlers for the worker to call.
 
@@ -24,6 +44,97 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (m *Master) GetTask(args *GetTaskReq, resp *GetTaskResp) error {
+	isMapDone := true
+	// default value
+	resp.MapFilename = ""
+	resp.ReduceTaskNum = -1
+
+	lock.Lock()
+	defer lock.Unlock()
+	for i := range m.mapTasks {
+		if m.mapTasks[i] == PENDING {
+			resp.MapFilename = m.filenames[i]
+			resp.ReduceSource = nil
+			resp.NReduce = m.nReduce
+			m.mapTasks[i] = WorkerOffset + args.WorkerId
+
+			// timeout timer
+			go func(taskNum int) {
+				time.Sleep(4 * time.Second)
+				lock.Lock()
+				defer lock.Unlock()
+				if m.mapTasks[taskNum] != DONE {
+					m.mapTasks[taskNum] = PENDING
+				}
+			}(i)
+
+			fmt.Printf("MAP task %s assigned to worker %d\n", m.filenames[i], args.WorkerId)
+			return nil
+		}
+
+		if m.mapTasks[i] != DONE {
+			fmt.Printf("MAP %d not done yet\n", i)
+			isMapDone = false
+		}
+	}
+
+	if !isMapDone {
+		return nil
+	}
+	for i := range m.reduceTasks {
+		if m.reduceTasks[i] == PENDING {
+			resp.ReduceSource = m.reduceSources[i]
+			resp.NReduce = m.nReduce
+			resp.ReduceTaskNum = i
+			m.reduceTasks[i] = WorkerOffset + args.WorkerId
+
+			// timeout timer
+			go func(taskNum int) {
+				time.Sleep(10 * time.Second)
+				lock.Lock()
+				defer lock.Unlock()
+				if m.reduceTasks[taskNum] != DONE {
+					m.reduceTasks[taskNum] = PENDING
+				}
+			}(i)
+
+			fmt.Printf("REDUCE task %d assigned to worker %d\n", i, args.WorkerId)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *Master) SubmitMap(args *SubmitMapReq, resp *NilResp) error {
+	lock.Lock()
+	defer lock.Unlock()
+	isMatch := false
+	for i, name := range m.filenames {
+		if name == args.Filename && m.mapTasks[i] == WorkerOffset+args.WorkerId {
+			m.mapTasks[i] = DONE
+			isMatch = true
+		}
+	}
+
+	if !isMatch {
+		return nil
+	}
+	for i, source := range args.ReduceSources {
+		m.reduceSources[i] = append(m.reduceSources[i], source...) // concat reduce tasks
+	}
+	return nil
+}
+
+func (m *Master) SubmitReduce(args *SubmitReduceReq, resp *NilResp) error {
+	lock.Lock()
+	defer lock.Unlock()
+	if m.reduceTasks[args.ReduceTask] == WorkerOffset+args.WorkerId {
+		m.reduceTasks[args.ReduceTask] = DONE
+		m.reduceResults = append(m.reduceResults, args.ReduceResult)
+	}
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,24 +157,46 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
-
 	// Your code here.
+	for i := range m.mapTasks {
+		if m.mapTasks[i] != DONE {
+			fmt.Printf("MAP %d not finished\n", i)
+			return false
+		}
+	}
+	for i := range m.reduceTasks {
+		if m.reduceTasks[i] != DONE {
+			fmt.Printf("REDUCE %d not finished\n", i)
+			return false
+		}
+	}
 
+	for i, result := range m.reduceResults {
+		oname := "mr-out-"
+		ofile, _ := os.Create(oname + strconv.Itoa(i))
+		for _, line := range result {
+			fmt.Fprintf(ofile, "%v %v\n", line.Key, line.Value)
+		}
+		ofile.Close()
+	}
 
-	return ret
+	return true
 }
 
 //
 // create a Master.
 // main/mrmaster.go calls this function.
-// nReduce is the number of reduce tasks to use.
+// NReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{nReduce: nReduce}
 
 	// Your code here.
 
+	m.filenames = files
+	m.mapTasks = make([]int, len(files))
+	m.reduceSources = make([][]KeyValue, nReduce)
+	m.reduceTasks = make([]int, nReduce)
 
 	m.server()
 	return &m
