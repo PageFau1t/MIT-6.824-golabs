@@ -63,7 +63,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			file.Close()
 
-			kva := mapf("", string(content))
+			kva := mapf(task.MapFilename, string(content))
 			result := make([][]KeyValue, nReduce)
 			for i := range result {
 				result[i] = make([]KeyValue, 0)
@@ -73,8 +73,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				result[reduceTaskNum] = append(result[reduceTaskNum], kv)
 			}
 			CallSubmitMap(task.MapFilename, result)
-		} else if task.ReduceSource != nil {
-			fmt.Printf("REDUCE TASK %d\n", task.ReduceTaskNum)
+		} else if task.ReduceTaskNum >= 0 {
+			//fmt.Printf("REDUCE TASK %d\n", task.ReduceTaskNum)
 			sort.Sort(ByKey(task.ReduceSource))
 			var reduceResult []KeyValue
 
@@ -93,7 +93,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 				i = j
 			}
-			fmt.Printf("REDUCE TASK %d DONE\n", task.ReduceTaskNum)
+			//fmt.Printf("REDUCE TASK %d DONE\n", task.ReduceTaskNum)
 
 			CallSubmitReduce(task.ReduceTaskNum, reduceResult)
 

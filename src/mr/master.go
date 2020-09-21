@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -28,6 +30,8 @@ const (
 	WorkerOffset = 10000
 )
 
+var lock sync.Mutex
+
 // Your code here -- RPC handlers for the worker to call.
 
 //
@@ -42,18 +46,28 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 func (m *Master) GetTask(args *GetTaskReq, resp *GetTaskResp) error {
 	isMapDone := true
+	// default value
+	resp.MapFilename = ""
+	resp.ReduceTaskNum = -1
 
+	lock.Lock()
+	defer lock.Unlock()
 	for i := range m.mapTasks {
 		if m.mapTasks[i] == PENDING {
 			resp.MapFilename = m.filenames[i]
 			resp.ReduceSource = nil
 			resp.NReduce = m.nReduce
-			resp.ReduceTaskNum = 0
 			m.mapTasks[i] = WorkerOffset + args.WorkerId
 
-			go func(m *Master) {
-
-			}(m)
+			// timeout timer
+			go func(taskNum int) {
+				time.Sleep(4 * time.Second)
+				lock.Lock()
+				defer lock.Unlock()
+				if m.mapTasks[taskNum] != DONE {
+					m.mapTasks[taskNum] = PENDING
+				}
+			}(i)
 
 			fmt.Printf("MAP task %s assigned to worker %d\n", m.filenames[i], args.WorkerId)
 			return nil
@@ -70,11 +84,20 @@ func (m *Master) GetTask(args *GetTaskReq, resp *GetTaskResp) error {
 	}
 	for i := range m.reduceTasks {
 		if m.reduceTasks[i] == PENDING {
-			resp.MapFilename = ""
 			resp.ReduceSource = m.reduceSources[i]
 			resp.NReduce = m.nReduce
 			resp.ReduceTaskNum = i
 			m.reduceTasks[i] = WorkerOffset + args.WorkerId
+
+			// timeout timer
+			go func(taskNum int) {
+				time.Sleep(10 * time.Second)
+				lock.Lock()
+				defer lock.Unlock()
+				if m.reduceTasks[taskNum] != DONE {
+					m.reduceTasks[taskNum] = PENDING
+				}
+			}(i)
 
 			fmt.Printf("REDUCE task %d assigned to worker %d\n", i, args.WorkerId)
 			return nil
@@ -84,10 +107,18 @@ func (m *Master) GetTask(args *GetTaskReq, resp *GetTaskResp) error {
 }
 
 func (m *Master) SubmitMap(args *SubmitMapReq, resp *NilResp) error {
+	lock.Lock()
+	defer lock.Unlock()
+	isMatch := false
 	for i, name := range m.filenames {
 		if name == args.Filename && m.mapTasks[i] == WorkerOffset+args.WorkerId {
 			m.mapTasks[i] = DONE
+			isMatch = true
 		}
+	}
+
+	if !isMatch {
+		return nil
 	}
 	for i, source := range args.ReduceSources {
 		m.reduceSources[i] = append(m.reduceSources[i], source...) // concat reduce tasks
@@ -96,11 +127,12 @@ func (m *Master) SubmitMap(args *SubmitMapReq, resp *NilResp) error {
 }
 
 func (m *Master) SubmitReduce(args *SubmitReduceReq, resp *NilResp) error {
+	lock.Lock()
+	defer lock.Unlock()
 	if m.reduceTasks[args.ReduceTask] == WorkerOffset+args.WorkerId {
 		m.reduceTasks[args.ReduceTask] = DONE
+		m.reduceResults = append(m.reduceResults, args.ReduceResult)
 	}
-	m.reduceResults = append(m.reduceResults, args.ReduceResult)
-
 	return nil
 }
 
