@@ -7,7 +7,7 @@ package main
 //
 
 import "fmt"
-import "6.824-golabs-2020/src/mr"
+import "mit6.824/src/mr"
 
 import "strings"
 import "unicode"

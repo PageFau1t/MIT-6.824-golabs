@@ -2,10 +2,10 @@ package shardkv
 
 
 // import "../shardmaster"
-import "../labrpc"
-import "../raft"
+import "mit6.824/src/labrpc"
+import "mit6.824/src/raft"
 import "sync"
-import "../labgob"
+import "mit6.824/src/labgob"
 
 
 

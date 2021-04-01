@@ -8,7 +8,7 @@ package main
 // go build -buildmode=plugin crash.go
 //
 
-import "6.824-golabs-2020/src/mr"
+import "mit6.824/src/mr"
 import crand "crypto/rand"
 import "math/big"
 import "strings"
