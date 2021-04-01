@@ -1,6 +1,8 @@
 # MIT-6.824-golabs
 6.824 Distributed Systems 2020 labs
 
+![CI status badge](https://github.com/PageFau1t/MIT-6.824-golabs/actions/workflows/go.yml/badge.svg)
+
 ---
 Course Homepage: <a href=https://pdos.csail.mit.edu/6.824/index.html>6.824: Distributed Systems<a/>
 
