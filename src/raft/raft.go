@@ -31,9 +31,17 @@ import (
 )
 
 const (
-	AppendHeartbeat = 50
-	ElecTimeoutMin  = 160
-	ElecTimeoutMax  = 360
+	AppendHeartbeat = 200
+	ElecTimeoutMin  = 700
+	ElecTimeoutMax  = 1900
+)
+
+type Status int
+
+const (
+	Follower Status = 1 + iota
+	Candidate
+	Leader
 )
 
 //
@@ -74,6 +82,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	currentTerm   int
 	currentLeader int
+	votedTerm     int
 	votedFor      int
 	log           []int
 
@@ -83,8 +92,8 @@ type Raft struct {
 	nextIndex   []int
 	matchIndex  []int
 
-	isLeader      bool
-	HBContext     context.Context
+	status Status
+	HBCancel      context.CancelFunc
 	electionReset chan struct{}
 }
 
@@ -95,8 +104,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	term = rf.currentTerm
-	isleader = rf.isLeader
+	isleader = rf.status == Leader
+	rf.mu.Unlock()
 
 	return term, isleader
 }
@@ -157,107 +168,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
-}
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CadidateId   int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	CurrentTerm int
-	VoteGranted bool
-}
-
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	if args.Term > rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CadidateId) {
-		reply.VoteGranted = true
-		reply.CurrentTerm = rf.currentTerm
-		return
-	}
-	reply.VoteGranted = false
-	reply.CurrentTerm = rf.currentTerm
-
-}
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
-// Append RPC
-type AppendArgs struct {
-	Term        int
-	LeaderId    int
-	PrevLogIdx  int
-	PrevLogTerm int
-	Entries     []int
-
-	LeaderCommit int
-}
-
-type AppendReply struct {
-}
-
-func (rf *Raft) AppendHandler(args *AppendArgs, reply *AppendReply) {
-	rf.electionReset <- struct{}{}
-	rf.mu.Lock()
-	if rf.currentTerm < args.Term {
-		rf.currentTerm = args.Term
-		rf.isLeader = false
-		rf.currentLeader = args.LeaderId
-	}
-	rf.mu.Unlock()
-}
-
-func (rf *Raft) sendAppend(server int, args *AppendArgs, reply *AppendReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendHandler", args, reply)
-	return ok
 }
 
 //
@@ -324,7 +234,10 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) election() {
 	rf.mu.Lock()
+	fmt.Printf("%d init election for term %d\n", rf.me, rf.currentTerm+1)
+	rf.status = Candidate
 	rf.currentTerm += 1
+	rf.votedTerm += 1
 	rf.votedFor = rf.me
 	req := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -333,40 +246,75 @@ func (rf *Raft) election() {
 		LastLogTerm:  0,
 	}
 	rf.mu.Unlock()
-
 	rf.electionReset <- struct{}{}
-	wg := sync.WaitGroup{}
-	wg.Add((len(rf.peers) + 1) / 2)
-	var votes int32 = 0
+
+	var votes int32 = 1
+	var response int32 = 1
+	voteDone := make(chan struct{})
+	responseDone := make(chan struct{})
+	closed := sync.Once{}
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(peerId int) {
-			defer wg.Done()
 			resp := new(RequestVoteReply)
 			ok := rf.sendRequestVote(peerId, req, resp)
 			if !ok {
-				fmt.Printf("NOT OK\n")
+				//fmt.Printf("[LOSS][%d] NO RESPOND from %d\n", rf.me, peerId)
+				return
 			}
 
 			if resp.VoteGranted {
 				atomic.AddInt32(&votes, 1)
+				votes := atomic.LoadInt32(&votes)
+				if int(votes) > len(rf.peers)/2 {
+					closed.Do(func() {
+						close(voteDone)
+					})
+				}
+				//fmt.Printf("[APPROVE][%d] approved by %d\n", rf.me, peerId)
+			} else {
+				//fmt.Printf("[REJ][%d] rejected by %d\n", rf.me, peerId)
+			}
+			atomic.AddInt32(&response, 1)
+			response := atomic.LoadInt32(&response)
+			if int(response) == len(rf.peers) {
+				close(responseDone)
 			}
 		}(i)
 	}
 
 	// waits for results
-	wg.Wait()
-	if int(atomic.LoadInt32(&votes)) > len(rf.peers)/2 {
-		fmt.Printf("%d become leader for term %d\n", rf.me, rf.currentTerm)
+	select {
+	case <-voteDone:
 		// become leader
+		fmt.Printf("%d becomes leader for term %d\n\n", rf.me, rf.currentTerm)
 		rf.mu.Lock()
-		rf.isLeader = true
-		rf.votedFor = -1
-		rf.mu.Unlock()
+		rf.status = Leader
+		rf.currentLeader = rf.me
 
 		// send heartbeat
+		ctx, cancel := context.WithCancel(context.Background())
+		rf.HBCancel = cancel
+		rf.mu.Unlock()
+		rf.leaderHB(ctx)
+	case <-responseDone:
+		// rejected
+		fmt.Printf("REJECTED\n")
+	case <-time.After(time.Duration(ElecTimeoutMin) * time.Millisecond):
+		// failed election
+		fmt.Printf("ELEC TIMEOUT[%d]\n", rf.me)
+	}
+}
+
+// leaderHB sends heartbeats to followers
+func (rf *Raft) leaderHB(ctx context.Context) {
+	for {
+		if rf.killed() {
+			return
+		}
+		rf.mu.Lock()
 		req2 := &AppendArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -375,20 +323,19 @@ func (rf *Raft) election() {
 			Entries:      nil,
 			LeaderCommit: 0,
 		}
+		rf.mu.Unlock()
 		for i := range rf.peers {
-			if i == rf.me {
-				continue
-			}
 			go func(peerId int) {
 				resp := new(AppendReply)
 				_ = rf.sendAppend(peerId, req2, resp)
 			}(i)
 		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(AppendHeartbeat) * time.Millisecond):
+		}
 	}
-}
-
-func (rf *Raft) leaderHB() {
-
 }
 
 //
